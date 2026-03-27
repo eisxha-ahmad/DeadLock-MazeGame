@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="DeadLock-MazeGame.vcxproj" Id="de166f15-7e3f-42ff-9ab7-7a1033af7786" />
+</Solution>
