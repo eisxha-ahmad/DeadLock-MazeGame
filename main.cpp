@@ -1,15 +1,21 @@
+
 #include <SFML/Graphics.hpp>
-#include <vector>
-#include <queue>
 #include <mpi.h>
+#include <omp.h>
 #include <CL/cl.h>
 #include <iostream>
+#include <cmath>
+#include <vector>
 
-const int ROWS = 21;
-const int COLS = 21;
-const int TILE = 28;
+// Constants
+const int SCREEN_W = 800;
+const int SCREEN_H = 600;
+const int MAP_W = 21;
+const int MAP_H = 21;
+const float FOV = 3.14159f / 3.0f; // 60 degrees
+const int NUM_RAYS = SCREEN_W;
 
-int maze[ROWS][COLS] = {
+int maze[MAP_H][MAP_W] = {
     {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
     {1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1},
     {1,0,1,1,0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,0,1},
@@ -33,197 +39,130 @@ int maze[ROWS][COLS] = {
     {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
 };
 
+// Player
+float playerX = 1.5f;
+float playerY = 1.5f;
+float playerAngle = 0.0f;
+const float MOVE_SPEED = 0.05f;
+const float ROT_SPEED = 0.03f;
 
-int playerRow = 1;
-int playerCol = 1;
-int exitRow = 19;
-int exitCol = 19;
-std::vector<std::pair<int, int>> enemies = {
-    {1, 19},
-    {19, 1},
-    {19, 19}
+// Raycasting
+struct Ray {
+    float distance;
+    int wallType;
 };
-void moveEnemy(int& eRow, int& eCol, int pRow, int pCol)
+
+Ray castRay(float angle)
 {
-    // BFS to find next step toward player
-    std::vector<std::vector<bool>> visited(ROWS, std::vector<bool>(COLS, false));
-    std::vector<std::vector<std::pair<int, int>>> parent(ROWS, std::vector<std::pair<int, int>>(COLS, { -1,-1 }));
+    float rayX = playerX;
+    float rayY = playerY;
+    float rayDirX = std::cos(angle);
+    float rayDirY = std::sin(angle);
 
-    std::queue<std::pair<int, int>> q;
-    q.push({ eRow, eCol });
-    visited[eRow][eCol] = true;
-
-    int dr[] = { -1, 1, 0, 0 };
-    int dc[] = { 0, 0, -1, 1 };
-
-    while (!q.empty())
+    for (int i = 0; i < 100; i++)
     {
-        auto [r, c] = q.front(); q.pop();
-        if (r == pRow && c == pCol) break;
-        for (int i = 0; i < 4; i++)
+        rayX += rayDirX * 0.05f;
+        rayY += rayDirY * 0.05f;
+
+        int mapX = (int)rayX;
+        int mapY = (int)rayY;
+
+        if (mapX < 0 || mapX >= MAP_W || mapY < 0 || mapY >= MAP_H)
+            return { 100.0f, 0 };
+
+        if (maze[mapY][mapX] == 1)
         {
-            int nr = r + dr[i];
-            int nc = c + dc[i];
-            if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS
-                && !visited[nr][nc] && maze[nr][nc] == 0)
-            {
-                visited[nr][nc] = true;
-                parent[nr][nc] = { r, c };
-                q.push({ nr, nc });
-            }
+            float dx = rayX - playerX;
+            float dy = rayY - playerY;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            return { dist, 1 };
         }
     }
-
-    // Trace path back
-    std::pair<int, int> step = { pRow, pCol };
-    while (parent[step.first][step.second] != std::make_pair(eRow, eCol))
-    {
-        if (parent[step.first][step.second] == std::make_pair(-1, -1)) return;
-        step = parent[step.first][step.second];
-    }
-    eRow = step.first;
-    eCol = step.second;
+    return { 100.0f, 0 };
 }
+
 int main(int argc, char** argv)
 {
-    // OpenCL Setup
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    // OpenCL setup
     cl_platform_id platform;
     cl_device_id device;
     cl_context context;
     cl_command_queue queue;
-
     clGetPlatformIDs(1, &platform, nullptr);
     clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, nullptr);
     context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, nullptr);
     queue = clCreateCommandQueueWithProperties(context, device, nullptr, nullptr);
 
-    std::cout << "OpenCL GPU initialized!" << std::endl;
-    MPI_Init(&argc, &argv);
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    sf::Texture playerTexture;
-    sf::Texture enemyTexture;
+    sf::RenderWindow window(sf::VideoMode({ SCREEN_W, SCREEN_H }), "DeadLock 3D");
 
-    if (!playerTexture.loadFromFile("user.png"))
-        std::cout << "Failed to load player texture!" << std::endl;
-    if (!enemyTexture.loadFromFile("enemy.png"))
-        std::cout << "Failed to load enemy texture!" << std::endl;
+    std::vector<Ray> rays(NUM_RAYS);
 
-    sf::Sprite playerSprite(playerTexture);
-    sf::Sprite enemySprite(enemyTexture);
-
-    playerSprite.setScale(sf::Vector2f(
-        (float)TILE / playerTexture.getSize().x,
-        (float)TILE / playerTexture.getSize().y));
-    enemySprite.setScale(sf::Vector2f(
-        (float)(TILE * 2) / enemyTexture.getSize().x,
-        (float)(TILE * 2) / enemyTexture.getSize().y));
-    int midRow = ROWS / 2;
-
-    // Determine which zone player is in
-    int playerZone = (playerRow < midRow) ? 0 : 1;
-
-    // Each process handles its zone
-    if (rank == playerZone)
-    {
-        // This process is responsible for player's zone
-    }
-
-    // Broadcast player position to all processes
-    MPI_Bcast(&playerRow, 1, MPI_INT, playerZone, MPI_COMM_WORLD);
-    MPI_Bcast(&playerCol, 1, MPI_INT, playerZone, MPI_COMM_WORLD);
-    sf::RenderWindow window(sf::VideoMode({ COLS * TILE, ROWS * TILE }), "DeadLock");
-    sf::Clock clock;
-    float timer = 0.0f;
-    float enemySpeed = 1.0f; // seconds
     while (window.isOpen())
     {
         while (const std::optional event = window.pollEvent())
-        {
             if (event->is<sf::Event::Closed>())
                 window.close();
 
-            if (event->is<sf::Event::KeyPressed>())
-            {
-                auto* key = event->getIf<sf::Event::KeyPressed>();
-                int newRow = playerRow;
-                int newCol = playerCol;
-
-                if (key->code == sf::Keyboard::Key::Up)    newRow--;
-                if (key->code == sf::Keyboard::Key::Down)  newRow++;
-                if (key->code == sf::Keyboard::Key::Left)  newCol--;
-                if (key->code == sf::Keyboard::Key::Right) newCol++;
-
-                if (maze[newRow][newCol] == 0)
-                {
-                    playerRow = newRow;
-                    playerCol = newCol;
-                }
-            }
-        }
-        timer += clock.restart().asSeconds();
-        if (timer >= enemySpeed)
+        // Player movement
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Left))
+            playerAngle -= ROT_SPEED;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Right))
+            playerAngle += ROT_SPEED;
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Up))
         {
-            #pragma omp parallel for
-            for (int i = 0; i < enemies.size(); i++)
-            {
-                moveEnemy(enemies[i].first, enemies[i].second, playerRow, playerCol);
-            }
-            timer = 0.0f;
-            for (auto& [eRow, eCol] : enemies)
-            {
-                if (eRow == playerRow && eCol == playerCol)
-                    window.close();
-            }
+            float nx = playerX + std::cos(playerAngle) * MOVE_SPEED;
+            float ny = playerY + std::sin(playerAngle) * MOVE_SPEED;
+            if (maze[(int)ny][(int)nx] == 0) { playerX = nx; playerY = ny; }
+        }
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down))
+        {
+            float nx = playerX - std::cos(playerAngle) * MOVE_SPEED;
+            float ny = playerY - std::sin(playerAngle) * MOVE_SPEED;
+            if (maze[(int)ny][(int)nx] == 0) { playerX = nx; playerY = ny; }
         }
 
-        window.clear(sf::Color(5, 0, 0));
-
-        sf::RectangleShape tile(sf::Vector2f(TILE - 2, TILE - 2));
-        for (int r = 0; r < ROWS; r++)
-            for (int c = 0; c < COLS; c++)
-            {
-                tile.setPosition(sf::Vector2f(c * TILE, r * TILE));
-                if (maze[r][c] == 1)
-                {
-                    // Dark red wall with slight variation for creepy effect
-                    int shade = 80 + (r * 3 + c * 2) % 40;
-                    tile.setFillColor(sf::Color(shade, 0, 0));
-                }
-                else
-                {
-                    // Dark floor
-                    int shade = 15 + (r + c) % 10;
-                    tile.setFillColor(sf::Color(shade, shade, shade));
-                }
-                window.draw(tile);
-            }
-        sf::RectangleShape exitTile(sf::Vector2f(TILE - 2, TILE - 2));
-        exitTile.setFillColor(sf::Color::Yellow);
-        exitTile.setPosition(sf::Vector2f(exitCol * TILE, exitRow * TILE));
-        window.draw(exitTile);
-
-        if (playerRow == exitRow && playerCol == exitCol)
+        // Cast rays using OpenMP
+#pragma omp parallel for
+        for (int i = 0; i < NUM_RAYS; i++)
         {
-            window.close();
+            float angle = playerAngle - FOV / 2 + (float)i / NUM_RAYS * FOV;
+            rays[i] = castRay(angle);
         }
-        // Zone boundary line
-        sf::RectangleShape boundary(sf::Vector2f(COLS * TILE, 2));
-        boundary.setFillColor(sf::Color::Red);
-        boundary.setPosition(sf::Vector2f(0, midRow * TILE));
-        window.draw(boundary);
 
-        playerSprite.setPosition(sf::Vector2f(playerCol * TILE, playerRow * TILE));
-        window.draw(playerSprite);
-        for (auto& [eRow, eCol] : enemies)
+        // Render
+        window.clear(sf::Color::Black);
+
+        // Floor and ceiling
+        sf::RectangleShape ceiling(sf::Vector2f(SCREEN_W, SCREEN_H / 2));
+        ceiling.setFillColor(sf::Color(20, 0, 0));
+        window.draw(ceiling);
+
+        sf::RectangleShape floor(sf::Vector2f(SCREEN_W, SCREEN_H / 2));
+        floor.setPosition(sf::Vector2f(0, SCREEN_H / 2));
+        floor.setFillColor(sf::Color(10, 10, 10));
+        window.draw(floor);
+
+        // Walls
+        for (int i = 0; i < NUM_RAYS; i++)
         {
-            enemySprite.setPosition(sf::Vector2f(eCol * TILE, eRow * TILE));
-            window.draw(enemySprite);
+            float dist = rays[i].distance;
+            int wallH = (int)(SCREEN_H / dist);
+
+            int shade = std::min(255, (int)(255 / (dist + 1)));
+            sf::RectangleShape wall(sf::Vector2f(1, wallH));
+            wall.setPosition(sf::Vector2f(i, (SCREEN_H - wallH) / 2));
+            wall.setFillColor(sf::Color(shade, 0, 0));
+            window.draw(wall);
         }
 
         window.display();
     }
+
     clReleaseCommandQueue(queue);
     clReleaseContext(context);
     MPI_Finalize();
