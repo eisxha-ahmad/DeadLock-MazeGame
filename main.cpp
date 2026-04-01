@@ -33,6 +33,7 @@ int maze[ROWS][COLS] = {
     {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
 };
 
+
 int playerRow = 1;
 int playerCol = 1;
 int exitRow = 19;
@@ -101,6 +102,23 @@ int main(int argc, char** argv)
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+    sf::Texture playerTexture;
+    sf::Texture enemyTexture;
+
+    if (!playerTexture.loadFromFile("user.png"))
+        std::cout << "Failed to load player texture!" << std::endl;
+    if (!enemyTexture.loadFromFile("enemy.png"))
+        std::cout << "Failed to load enemy texture!" << std::endl;
+
+    sf::Sprite playerSprite(playerTexture);
+    sf::Sprite enemySprite(enemyTexture);
+
+    playerSprite.setScale(sf::Vector2f(
+        (float)TILE / playerTexture.getSize().x,
+        (float)TILE / playerTexture.getSize().y));
+    enemySprite.setScale(sf::Vector2f(
+        (float)(TILE * 2) / enemyTexture.getSize().x,
+        (float)(TILE * 2) / enemyTexture.getSize().y));
     int midRow = ROWS / 2;
 
     // Determine which zone player is in
@@ -160,7 +178,7 @@ int main(int argc, char** argv)
             }
         }
 
-        window.clear(sf::Color::Black);
+        window.clear(sf::Color(5, 0, 0));
 
         sf::RectangleShape tile(sf::Vector2f(TILE - 2, TILE - 2));
         for (int r = 0; r < ROWS; r++)
@@ -168,9 +186,17 @@ int main(int argc, char** argv)
             {
                 tile.setPosition(sf::Vector2f(c * TILE, r * TILE));
                 if (maze[r][c] == 1)
-                    tile.setFillColor(sf::Color::Blue);
+                {
+                    // Dark red wall with slight variation for creepy effect
+                    int shade = 80 + (r * 3 + c * 2) % 40;
+                    tile.setFillColor(sf::Color(shade, 0, 0));
+                }
                 else
-                    tile.setFillColor(sf::Color::Black);
+                {
+                    // Dark floor
+                    int shade = 15 + (r + c) % 10;
+                    tile.setFillColor(sf::Color(shade, shade, shade));
+                }
                 window.draw(tile);
             }
         sf::RectangleShape exitTile(sf::Vector2f(TILE - 2, TILE - 2));
@@ -188,16 +214,12 @@ int main(int argc, char** argv)
         boundary.setPosition(sf::Vector2f(0, midRow * TILE));
         window.draw(boundary);
 
-        sf::CircleShape player(TILE / 2 - 3);
-        player.setFillColor(sf::Color::Green);
-        player.setPosition(sf::Vector2f(playerCol * TILE + 2, playerRow * TILE + 2));
-        window.draw(player);
+        playerSprite.setPosition(sf::Vector2f(playerCol * TILE, playerRow * TILE));
+        window.draw(playerSprite);
         for (auto& [eRow, eCol] : enemies)
         {
-            sf::CircleShape enemy(TILE / 2 - 3);
-            enemy.setFillColor(sf::Color::Red);
-            enemy.setPosition(sf::Vector2f(eCol * TILE + 2, eRow * TILE + 2));
-            window.draw(enemy);
+            enemySprite.setPosition(sf::Vector2f(eCol * TILE, eRow * TILE));
+            window.draw(enemySprite);
         }
 
         window.display();
